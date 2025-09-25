@@ -7,12 +7,27 @@ import org.slf4j.LoggerFactory;
 import javax.script.Invocable;
 import javax.script.ScriptEngine;
 import javax.script.ScriptException;
+import java.io.IOException;
 
 /**
  * Describes one signature cipher
  */
 public class SignatureCipher {
   private static final Logger log = LoggerFactory.getLogger(SignatureCipher.class);
+  
+  // Singleton Node.js executor instance
+  private static NodeJsCipherExecutor nodeExecutor;
+  private static boolean useNodeJs = true;
+  
+  static {
+    try {
+      nodeExecutor = new NodeJsCipherExecutor();
+      log.info("Node.js cipher executor initialized - using Node.js for YouTube decryption");
+    } catch (IOException e) {
+      log.warn("Failed to initialize Node.js executor, falling back to Rhino: {}", e.getMessage());
+      useNodeJs = false;
+    }
+  }
 
   public final String timestamp;
   public final String globalVars;
@@ -42,7 +57,21 @@ public class SignatureCipher {
   public String apply(@NotNull String text,
                       @NotNull ScriptEngine scriptEngine) throws ScriptException, NoSuchMethodException {
     String transformed;
-
+    
+    // Try Node.js executor first if available
+    if (useNodeJs && nodeExecutor != null) {
+      try {
+        transformed = nodeExecutor.decryptSignature(text, globalVars, sigActions, sigFunction);
+        if (transformed != null && !transformed.isEmpty()) {
+          log.debug("Successfully decrypted signature using Node.js");
+          return transformed;
+        }
+      } catch (IOException e) {
+        log.warn("Node.js decryption failed, falling back to Rhino: {}", e.getMessage());
+      }
+    }
+    
+    // Fallback to Rhino
     scriptEngine.eval(globalVars + ";" + sigActions + ";decrypt_sig=" + sigFunction);
     transformed = (String) ((Invocable) scriptEngine).invokeFunction("decrypt_sig", text);
     return transformed;
@@ -86,7 +115,21 @@ public class SignatureCipher {
   public String transform(@NotNull String text, @NotNull ScriptEngine scriptEngine)
       throws ScriptException, NoSuchMethodException {
     String transformed;
-
+    
+    // Try Node.js executor first if available
+    if (useNodeJs && nodeExecutor != null) {
+      try {
+        transformed = nodeExecutor.transformNParameter(text, globalVars, nFunction);
+        if (transformed != null && !transformed.isEmpty()) {
+          log.debug("Successfully transformed n-parameter using Node.js");
+          return transformed;
+        }
+      } catch (IOException e) {
+        log.warn("Node.js n-parameter transformation failed, falling back to Rhino: {}", e.getMessage());
+      }
+    }
+    
+    // Fallback to Rhino
     scriptEngine.eval(globalVars + ";decrypt_nsig=" + nFunction);
     transformed = (String) ((Invocable) scriptEngine).invokeFunction("decrypt_nsig", text);
 
