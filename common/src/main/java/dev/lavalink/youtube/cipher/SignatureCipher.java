@@ -128,42 +128,29 @@ public class SignatureCipher {
    */
   public String transform(@NotNull String text, @NotNull ScriptEngine scriptEngine)
       throws ScriptException, NoSuchMethodException {
-    if (useNodeJs) {
-      // If we don't have the n function name, try to find it dynamically
-      String nFunc = nFunctionName;
-      if (nFunc == null || nFunc.isEmpty()) {
-        nFunc = findNFunctionDynamically();
-      }
-      
-      if (nFunc != null) {
-        try {
-          // Use Node.js runner for better compatibility
-          if (nParamValues != null) {
-            // Try each parameter value until one works
-            String[] params = nParamValues.split(",");
-            for (String param : params) {
-              try {
-                String result = NodeJsRunner.execute(rawScript, nFunc, param.trim(), text);
-                if (result != null && !result.equals(text)) {
-                  return result;
-                }
-              } catch (IOException ignored) {
-                // Try next parameter
+    if (useNodeJs && nFunctionName != null) {
+      try {
+        // Use Node.js runner for better compatibility
+        if (nParamValues != null) {
+          // Try each parameter value until one works
+          String[] params = nParamValues.split(",");
+          for (String param : params) {
+            try {
+              String result = NodeJsRunner.execute(rawScript, nFunctionName, param.trim(), text);
+              if (result != null && !result.equals(text)) {
+                return result;
               }
+            } catch (IOException ignored) {
+              // Try next parameter
             }
-            // If all parameters failed, try without parameter
-            return NodeJsRunner.execute(rawScript, nFunc, text);
-          } else {
-            return NodeJsRunner.execute(rawScript, nFunc, text);
           }
-        } catch (IOException e) {
-          log.warn("Failed to execute nsig function with Node.js, falling back to Rhino", e);
+          // If all parameters failed, try without parameter
+          return NodeJsRunner.execute(rawScript, nFunctionName, text);
+        } else {
+          return NodeJsRunner.execute(rawScript, nFunctionName, text);
         }
-      } else {
-        // If we still can't find the n function, just return the original text
-        // This is better than throwing an exception
-        log.debug("Could not find n-transform function, returning original n parameter");
-        return text;
+      } catch (IOException e) {
+        log.warn("Failed to execute nsig function with Node.js, falling back to Rhino", e);
       }
     }
     
@@ -188,36 +175,4 @@ public class SignatureCipher {
 //  public boolean isEmpty() {
 //    return operations.isEmpty();
 //  }
-  
-  /**
-   * Try to find the n-transform function dynamically by looking for common patterns
-   */
-  private String findNFunctionDynamically() {
-    if (rawScript == null || rawScript.isEmpty()) {
-      return null;
-    }
-    
-    // Try a few simple patterns to find potential n-transform functions
-    String[] patterns = {
-        // Look for functions that manipulate the input and have try-catch
-        "([a-zA-Z0-9$_]+)\\s*=\\s*function\\(a\\)\\{[^}]*try\\{[^}]*\\}catch[^}]*\\}",
-        // Functions with characteristic array operations
-        "([a-zA-Z0-9$_]+)\\s*=\\s*function\\(a\\)\\{[^}]*\\.split\\([^}]*return[^}]+\\}"
-    };
-    
-    for (String pattern : patterns) {
-      java.util.regex.Pattern p = java.util.regex.Pattern.compile(pattern);
-      java.util.regex.Matcher m = p.matcher(rawScript.substring(0, Math.min(rawScript.length(), 100000)));
-      if (m.find()) {
-        String funcName = m.group(1);
-        // Quick validation
-        if (rawScript.contains(funcName + "=function")) {
-          log.debug("Dynamically found potential n-transform function: {}", funcName);
-          return funcName;
-        }
-      }
-    }
-    
-    return null;
-  }
 }
