@@ -254,41 +254,62 @@ public class SignatureCipherManager {
       scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.TIMESTAMP_NOT_FOUND);
     }
 
-    Matcher globalVarsMatcher = GLOBAL_VARS_PATTERN.matcher(script);
-
-    if (!globalVarsMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.VARIABLES_NOT_FOUND);
-    }
-
-    Matcher sigActionsMatcher = ACTIONS_PATTERN.matcher(script);
-
-    if (!sigActionsMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.SIG_ACTIONS_NOT_FOUND);
-    }
-
-    Matcher sigFunctionMatcher = SIG_FUNCTION_PATTERN.matcher(script);
-
-    if (!sigFunctionMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.DECIPHER_FUNCTION_NOT_FOUND);
-    }
-
-    Matcher nFunctionMatcher = N_FUNCTION_PATTERN.matcher(script);
-
-    if (!nFunctionMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.N_FUNCTION_NOT_FOUND);
-    }
-
     String timestamp = scriptTimestamp.group(2);
-    String globalVars = globalVarsMatcher.group("code");
-    String sigActions = sigActionsMatcher.group(0);
-    String sigFunction = sigFunctionMatcher.group(0);
-    String nFunction = nFunctionMatcher.group(0);
+    
+    // Try to extract function names for Node.js execution
+    String sigFunctionName = extractSignatureFunctionName(script);
+    String nFunctionName = extractNFunctionName(script);
+    
+    // Extract parameter values if needed
+    String sigParamValue = extractSigParamValue(script, sigFunctionName);
+    String nParamValues = extractNParamValues(script, nFunctionName);
+    
+    // Check if we should use Node.js based on successful function name extraction
+    boolean useNodeJs = sigFunctionName != null && nFunctionName != null;
+    
+    if (useNodeJs) {
+      log.debug("Using Node.js runner with sig function: {} and n function: {}", sigFunctionName, nFunctionName);
+      // For Node.js, we don't need to extract the individual parts, just the function names
+      return new SignatureCipher(timestamp, "", "", "", sigFunctionName, sigParamValue,
+                                "", nFunctionName, nParamValues, script, true);
+    } else {
+      log.debug("Falling back to Rhino extraction");
+      // Fall back to traditional extraction for Rhino
+      Matcher globalVarsMatcher = GLOBAL_VARS_PATTERN.matcher(script);
 
-    String nfParameterName = DataFormatTools.extractBetween(nFunction, "(", ")");
-    // Remove short-circuit that prevents n challenge transformation
-    nFunction = nFunction.replaceAll("if\\s*\\(typeof\\s*[^\\s()]+\\s*===?.*?\\)return " + nfParameterName + "\\s*;?", "");
+      if (!globalVarsMatcher.find()) {
+        scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.VARIABLES_NOT_FOUND);
+      }
 
-    return new SignatureCipher(timestamp, globalVars, sigActions, sigFunction, nFunction, script);
+      Matcher sigActionsMatcher = ACTIONS_PATTERN.matcher(script);
+
+      if (!sigActionsMatcher.find()) {
+        scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.SIG_ACTIONS_NOT_FOUND);
+      }
+
+      Matcher sigFunctionMatcher = SIG_FUNCTION_PATTERN.matcher(script);
+
+      if (!sigFunctionMatcher.find()) {
+        scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.DECIPHER_FUNCTION_NOT_FOUND);
+      }
+
+      Matcher nFunctionMatcher = N_FUNCTION_PATTERN.matcher(script);
+
+      if (!nFunctionMatcher.find()) {
+        scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.N_FUNCTION_NOT_FOUND);
+      }
+
+      String globalVars = globalVarsMatcher.group("code");
+      String sigActions = sigActionsMatcher.group(0);
+      String sigFunction = sigFunctionMatcher.group(0);
+      String nFunction = nFunctionMatcher.group(0);
+
+      String nfParameterName = DataFormatTools.extractBetween(nFunction, "(", ")");
+      // Remove short-circuit that prevents n challenge transformation
+      nFunction = nFunction.replaceAll("if\\s*\\(typeof\\s*[^\\s()]+\\s*===?.*?\\)return " + nfParameterName + "\\s*;?", "");
+
+      return new SignatureCipher(timestamp, globalVars, sigActions, sigFunction, nFunction, script);
+    }
   }
 
   private void scriptExtractionFailed(String script, String sourceUrl, ExtractionFailureType failureType) {
@@ -313,6 +334,133 @@ public class SignatureCipherManager {
     } catch (URISyntaxException e) {
       throw new RuntimeException(e);
     }
+  }
+  
+  /**
+   * Extract the signature function name from the script
+   */
+  private String extractSignatureFunctionName(@NotNull String script) {
+    // Patterns similar to pytubefix's get_sig_function_name
+    String[] patterns = {
+        // Pattern 1: Look for function with split operation
+        "(?P<sig>[a-zA-Z0-9_$]+)\\s*=\\s*function\\(\\s*(?P<arg>[a-zA-Z0-9_$]+)\\s*\\)\\s*\\{\\s*(?P=arg)\\s*=\\s*(?P=arg)\\.split\\(\\s*[a-zA-Z0-9_\\$\\\"\\[\\]]+\\s*\\)\\s*;\\s*[^}]+;\\s*return\\s+(?P=arg)\\.join\\(\\s*[a-zA-Z0-9_\\$\\\"\\[\\]]+\\s*\\)",
+        "(?:\\b|[^a-zA-Z0-9_$])([a-zA-Z0-9_$]{2,})\\s*=\\s*function\\(\\s*a\\s*\\)\\s*\\{\\s*a\\s*=\\s*a\\.split\\(\\s*\\\"\\\"\\s*\\)",
+        "\\b([a-zA-Z0-9_$]+)&&\\(\\1=([a-zA-Z0-9_$]{2,})\\(decodeURIComponent\\(\\1\\)\\)",
+        "\\b[cs]\\s*&&\\s*[adf]\\.set\\([^,]+\\s*,\\s*encodeURIComponent\\s*\\(\\s*([a-zA-Z0-9$]+)\\(",
+        "\\b[a-zA-Z0-9]+\\s*&&\\s*[a-zA-Z0-9]+\\.set\\([^,]+\\s*,\\s*encodeURIComponent\\s*\\(\\s*([a-zA-Z0-9$]+)\\(",
+        "\\bm=([a-zA-Z0-9$]{2,})\\(decodeURIComponent\\(h\\.s\\)\\)"
+    };
+    
+    for (String pattern : patterns) {
+      Pattern p = Pattern.compile(pattern);
+      Matcher m = p.matcher(script);
+      if (m.find()) {
+        String funcName = m.groupCount() >= 2 ? m.group(2) : m.group(1);
+        log.debug("Found signature function name: {}", funcName);
+        return funcName;
+      }
+    }
+    
+    log.debug("Could not find signature function name");
+    return null;
+  }
+  
+  /**
+   * Extract the n-transform function name from the script
+   */
+  private String extractNFunctionName(@NotNull String script) {
+    // Try to find the function based on the global array (similar to pytubefix)
+    Matcher globalObjMatcher = GLOBAL_VARS_PATTERN.matcher(script);
+    
+    if (globalObjMatcher.find()) {
+      String varname = globalObjMatcher.group("varname");
+      log.debug("Found global variable: {}", varname);
+      
+      // Look for functions that use this variable and match the n-transform pattern
+      String pattern = String.format(
+          "(?xs)\n" +
+          "[;\\n](?:\n" +
+          "  (?:function\\s+)|\n" +
+          "  (?:var\\s+)?\n" +
+          ")([a-zA-Z0-9_$]+)\\s*(?:|=\\s*function\\s*)\n" +
+          "\\(([a-zA-Z0-9_$]+)\\)\\s*\\{\n" +
+          "(?:(?!\\};(?![\\]\\)])).)+ \n" +
+          "\\}\\s*catch\\(\\s*[a-zA-Z0-9_$]+\\s*\\)\\s*\n" +
+          "\\{\\s*return\\s+%s\\[\\d+\\]\\s*\\+\\s*\\2\\s*\\}\\s*return\\s+[^}]+\\}[;\\n]",
+          Pattern.quote(varname)
+      );
+      
+      Pattern p = Pattern.compile(pattern);
+      Matcher m = p.matcher(script);
+      if (m.find()) {
+        String funcName = m.group(1);
+        log.debug("Found n-transform function name: {}", funcName);
+        return funcName;
+      }
+    }
+    
+    // Fallback: try simpler patterns
+    String[] patterns = {
+        "([a-zA-Z0-9_$]+)\\s*=\\s*function\\([^)]+\\)\\s*\\{[^}]*enhanced_except_[^}]*\\}",
+        "function\\s+([a-zA-Z0-9_$]+)\\([^)]+\\)\\s*\\{[^}]*_w8_[^}]*\\}"
+    };
+    
+    for (String pattern : patterns) {
+      Pattern p = Pattern.compile(pattern, Pattern.DOTALL);
+      Matcher m = p.matcher(script);
+      if (m.find()) {
+        String funcName = m.group(1);
+        log.debug("Found n-transform function name (fallback): {}", funcName);
+        return funcName;
+      }
+    }
+    
+    log.debug("Could not find n-transform function name");
+    return null;
+  }
+  
+  /**
+   * Extract parameter value for signature function if needed
+   */
+  private String extractSigParamValue(@NotNull String script, String functionName) {
+    if (functionName == null) return null;
+    
+    // Check if the function takes two parameters
+    String pattern = functionName + "\\s*=\\s*function\\s*\\(\\s*([a-zA-Z0-9_$]+)\\s*,\\s*([a-zA-Z0-9_$]+)\\s*\\)";
+    Pattern p = Pattern.compile(pattern);
+    Matcher m = p.matcher(script);
+    
+    if (m.find()) {
+      // Function takes two parameters, need to find what value to pass as first parameter
+      // This would require more complex analysis of the call sites
+      log.debug("Signature function takes two parameters, parameter extraction needed");
+      // For now, return null and let it try without parameter
+      return null;
+    }
+    
+    return null;
+  }
+  
+  /**
+   * Extract parameter values for n-transform function if needed
+   */
+  private String extractNParamValues(@NotNull String script, String functionName) {
+    if (functionName == null) return null;
+    
+    // Look for array indices that might be used as parameters
+    // This is a simplified version - in practice, you might need more sophisticated extraction
+    String pattern = functionName + "\\s*\\([^,]+,\\s*([^)]+)\\)";
+    Pattern p = Pattern.compile(pattern);
+    Matcher m = p.matcher(script);
+    
+    if (m.find()) {
+      log.debug("N-transform function might need parameter values");
+      // Return a comma-separated list of potential parameter values to try
+      // These are common values seen in YouTube's implementation
+      return "0,1,2,3,4,5,6,7,8,9";
+    }
+    
+    return null;
   }
 
   public static class CachedPlayerScript {
