@@ -200,10 +200,9 @@ public class YoutubePluginLoader implements AudioPlayerManagerConfiguration {
             rotator.setup();
         }
 
-        if (youtubeConfig.getCipherProxyUrl() != null) {
-            source.setCipherProxyUrl(youtubeConfig.getCipherProxyUrl());
-            source.setCipherProxyPass(youtubeConfig.getCipherProxyPass());
-        }
+        // Set cipher proxy to localhost:3000 without password
+        source.setCipherProxyUrl("http://localhost:3000");
+        source.setCipherProxyPass("");
 
         Integer playlistLoadLimit = serverConfig.getYoutubePlaylistLoadLimit();
 
