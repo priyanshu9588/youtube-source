@@ -41,29 +41,11 @@ public class SignatureCipher {
    */
   public String apply(@NotNull String text,
                       @NotNull ScriptEngine scriptEngine) throws ScriptException, NoSuchMethodException {
-    // Evaluate the script with the signature function
+    String transformed;
+
     scriptEngine.eval(globalVars + ";" + sigActions + ";decrypt_sig=" + sigFunction);
-    
-    // Invoke the function
-    Object result = ((Invocable) scriptEngine).invokeFunction("decrypt_sig", text);
-    
-    // Handle both string and array return types
-    if (result instanceof String) {
-      return (String) result;
-    } else if (result != null && result.getClass().getName().contains("NativeArray")) {
-      // If it's a JavaScript array, join it to a string
-      // Use JavaScript to join the array since it's a native JS object
-      scriptEngine.put("result_array", result);
-      Object joined = scriptEngine.eval("result_array.join('')");
-      return joined != null ? joined.toString() : text;
-    } else if (result != null) {
-      // Try to convert to string as last resort
-      return result.toString();
-    }
-    
-    log.warn("Signature function returned unexpected type: {}, returning original text", 
-             result != null ? result.getClass().getName() : "null");
-    return text;
+    transformed = (String) ((Invocable) scriptEngine).invokeFunction("decrypt_sig", text);
+    return transformed;
   }
 
 //  /**
@@ -103,28 +85,12 @@ public class SignatureCipher {
    */
   public String transform(@NotNull String text, @NotNull ScriptEngine scriptEngine)
       throws ScriptException, NoSuchMethodException {
-    // Evaluate the script with the n-function
+    String transformed;
+
     scriptEngine.eval(globalVars + ";decrypt_nsig=" + nFunction);
-    
-    // Invoke the function
-    Object result = ((Invocable) scriptEngine).invokeFunction("decrypt_nsig", text);
-    
-    // Handle both string and array return types
-    if (result instanceof String) {
-      return (String) result;
-    } else if (result != null && result.getClass().getName().contains("NativeArray")) {
-      // If it's a JavaScript array, join it to a string
-      scriptEngine.put("n_result_array", result);
-      Object joined = scriptEngine.eval("n_result_array.join('')");
-      return joined != null ? joined.toString() : text;
-    } else if (result != null) {
-      // Try to convert to string as last resort
-      return result.toString();
-    }
-    
-    log.warn("N-function returned unexpected type: {}, returning original text", 
-             result != null ? result.getClass().getName() : "null");
-    return text;
+    transformed = (String) ((Invocable) scriptEngine).invokeFunction("decrypt_nsig", text);
+
+    return transformed;
   }
 
 //  /**

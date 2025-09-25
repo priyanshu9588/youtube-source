@@ -89,27 +89,15 @@ public class SignatureCipherManagerTest {
                 boolean hasSigParam = uriString.contains("sig=") || uriString.contains("signature=");
                 Assertions.assertTrue(hasSigParam, "URL should contain a signature parameter");
                 
-                // Due to changes in YouTube's player script, transformation may not always work
-                // We'll check if parameters are present but be lenient about transformation
+                // Verify that the transformed parameters are not the same as the input
                 if (hasNParam) {
-                    String nValue = extractParamValue(uriString, "n");
-                    System.out.println("N parameter: original='" + currentTest.nParam + "', result='" + nValue + "'");
-                    // For now, just check that we have some n parameter value
-                    Assertions.assertFalse(nValue.isEmpty(), "n parameter should have a value");
+                    Assertions.assertFalse(uriString.contains("n=" + currentTest.nParam), 
+                        "n parameter should be transformed");
                 }
                 
                 if (hasSigParam) {
-                    String sigValue = extractParamValue(uriString, "sig");
-                    if (sigValue.isEmpty()) {
-                        sigValue = extractParamValue(uriString, "signature");
-                    }
-                    System.out.println("Signature: original='" + currentTest.signature.substring(0, 20) + "...', result='" + 
-                                       (sigValue.length() > 20 ? sigValue.substring(0, 20) + "..." : sigValue) + "'");
-                    // Check that signature parameter exists
-                    Assertions.assertFalse(sigValue.isEmpty(), "signature parameter should have a value");
-                    
-                    // Note: With the new YouTube player, transformation may not be detectable
-                    // or may not be necessary for certain signatures
+                    Assertions.assertFalse(uriString.contains(currentTest.signature), 
+                        "Signature should be transformed");
                 }
                 
             } catch (IOException | IllegalStateException e) {
