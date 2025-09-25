@@ -450,6 +450,8 @@ public class YoutubeAudioSourceManager implements AudioSourceManager {
 
     public void setCipherProxyUrl(String cipherProxyUrl) {
         this.cipherProxyUrl = cipherProxyUrl;
+        // Reinitialize cipher manager with new proxy settings
+        this.cipherManager = new SignatureCipherManager(this.cipherProxyUrl, this.cipherProxyPass);
     }
 
     public String getCipherProxyPass() {
@@ -458,5 +460,7 @@ public class YoutubeAudioSourceManager implements AudioSourceManager {
 
     public void setCipherProxyPass(String cipherProxyPass) {
         this.cipherProxyPass = cipherProxyPass;
+        // Reinitialize cipher manager with new proxy settings
+        this.cipherManager = new SignatureCipherManager(this.cipherProxyUrl, this.cipherProxyPass);
     }
 }
