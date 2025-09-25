@@ -138,8 +138,51 @@ public class NodeJsRunner {
                "        const data = JSON.parse(input);\n" +
                "        const { js_code, func_name, args } = data;\n" +
                "        \n" +
-               "        // Create a new context with the JavaScript code\n" +
-               "        const context = vm.createContext({});\n" +
+               "        // Create a context with browser-like globals that YouTube script expects\n" +
+               "        const context = vm.createContext({\n" +
+               "            document: {\n" +
+               "                location: { \n" +
+               "                    href: 'https://www.youtube.com',\n" +
+               "                    hostname: 'www.youtube.com',\n" +
+               "                    protocol: 'https:'\n" +
+               "                },\n" +
+               "                createElement: () => ({ style: {} }),\n" +
+               "                getElementById: () => null,\n" +
+               "                querySelector: () => null,\n" +
+               "                querySelectorAll: () => []\n" +
+               "            },\n" +
+               "            window: {\n" +
+               "                location: { \n" +
+               "                    href: 'https://www.youtube.com',\n" +
+               "                    hostname: 'www.youtube.com',\n" +
+               "                    protocol: 'https:',\n" +
+               "                    host: 'www.youtube.com'\n" +
+               "                },\n" +
+               "                navigator: { \n" +
+               "                    userAgent: 'Mozilla/5.0',\n" +
+               "                    userAgentData: null\n" +
+               "                },\n" +
+               "                document: {}\n" +
+               "            },\n" +
+               "            navigator: { \n" +
+               "                userAgent: 'Mozilla/5.0',\n" +
+               "                userAgentData: null\n" +
+               "            },\n" +
+               "            location: {\n" +
+               "                href: 'https://www.youtube.com',\n" +
+               "                hostname: 'www.youtube.com'\n" +
+               "            },\n" +
+               "            console: console,\n" +
+               "            setTimeout: setTimeout,\n" +
+               "            setInterval: setInterval,\n" +
+               "            clearTimeout: clearTimeout,\n" +
+               "            clearInterval: clearInterval,\n" +
+               "            globalThis: {}\n" +
+               "        });\n" +
+               "        // Make window reference itself\n" +
+               "        context.window.window = context.window;\n" +
+               "        context.window.document = context.document;\n" +
+               "        context.globalThis = context;\n" +
                "        \n" +
                "        // Execute the JavaScript code in the context\n" +
                "        vm.runInContext(js_code, context);\n" +
