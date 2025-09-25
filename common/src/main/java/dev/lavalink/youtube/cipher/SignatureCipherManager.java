@@ -65,9 +65,17 @@ public class SignatureCipherManager {
           "\\s*" + VARIABLE_PART_OBJECT_DECLARATION + "\\s*:\\s*function\\s*\\([^)]*\\)\\s*\\{[^{}]*(?:\\{[^{}]*}[^{}]*)*}\\s*," +
           "\\s*" + VARIABLE_PART_OBJECT_DECLARATION + "\\s*:\\s*function\\s*\\([^)]*\\)\\s*\\{[^{}]*(?:\\{[^{}]*}[^{}]*)*}\\s*};");
 
+  // Updated pattern for newer YouTube player scripts (as of 2025)
+  // The signature function now has a different structure
   private static final Pattern SIG_FUNCTION_PATTERN = Pattern.compile(
+      // Try the old pattern first
+      "(?:" +
       "function(?:\\s+" + VARIABLE_PART + ")?\\((" + VARIABLE_PART + ")\\)\\{" +
-          VARIABLE_PART + "=" + VARIABLE_PART + ".*?\\(\\1,\\d+\\);return\\s*\\1.*};"
+          VARIABLE_PART + "=" + VARIABLE_PART + ".*?\\(\\1,\\d+\\);return\\s*\\1.*};" +
+      "|" +
+      // New pattern: func(a){...;something(a,number);...;return a}
+      "([a-zA-Z_$][a-zA-Z_0-9$]*)=function\\(([a-zA-Z])\\)\\{[^}]*\\(\\2,\\d+\\)[^}]*return[^}]*\\2[^}]*\\}" +
+      ")"
   );
 
   private static final Pattern N_FUNCTION_PATTERN = Pattern.compile(
@@ -129,7 +137,14 @@ public class SignatureCipherManager {
       try {
         uri.setParameter(format.getSignatureKey(), cipher.apply(signature, scriptEngine));
       } catch (ScriptException | NoSuchMethodException e) {
-        dumpProblematicScript(cipherCache.get(playerScript).rawScript, playerScript, "Can't transform s parameter " + signature);
+        // Log the failure but still add the original signature
+        log.warn("Failed to transform signature, using original: {}", e.getMessage());
+        uri.setParameter(format.getSignatureKey(), signature);
+        // Dump the script only once to avoid spam
+        if (!dumpedScriptUrls.contains(playerScript + "-sig")) {
+          dumpProblematicScript(cipherCache.get(playerScript).rawScript, playerScript, "Can't transform s parameter " + signature);
+          dumpedScriptUrls.add(playerScript + "-sig");
+        }
       }
     }
       
@@ -150,13 +165,21 @@ public class SignatureCipherManager {
         if (logMessage != null) {
             log.warn("{} (in: {}, out: {}, player script: {}, source version: {})",
                 logMessage, nParameter, transformed, playerScript, YoutubeSource.VERSION);
+            // Still add the original n parameter even if transformation failed
+            uri.setParameter("n", nParameter);
+        } else {
+            uri.setParameter("n", transformed);
         }
-
-        uri.setParameter("n", transformed);
-      } catch (ScriptException | NoSuchMethodException e) {
-        // URLs can still be played without a resolved n parameter. It just means they're
-        // throttled. But we shouldn't throw an exception anyway as it's not really fatal.
-        dumpProblematicScript(cipherCache.get(playerScript).rawScript, playerScript, "Can't transform n parameter " + nParameter + " with " + cipher.nFunction + " n function");
+      } catch (Exception e) {
+        // URLs can still be played without a resolved n parameter, though they may be throttled
+        // Add the original n parameter as fallback
+        log.debug("Failed to transform n parameter, using original: {}", e.getMessage());
+        uri.setParameter("n", nParameter);
+        // Only dump script on first failure to avoid spam
+        if (cipherCache.get(playerScript) != null && !dumpedScriptUrls.contains(playerScript + "-nfunc")) {
+          dumpProblematicScript(cipherCache.get(playerScript).rawScript, playerScript, "Can't transform n parameter");
+          dumpedScriptUrls.add(playerScript + "-nfunc");
+        }
       }
     }
 
@@ -248,45 +271,162 @@ public class SignatureCipherManager {
   }
 
   private SignatureCipher extractFromScript(@NotNull String script, @NotNull String sourceUrl) {
+    // First, try using the new JavaScript extractor
+    JavaScriptExtractor extractor = new JavaScriptExtractor(script);
+    
+    // Extract timestamp
     Matcher scriptTimestamp = TIMESTAMP_PATTERN.matcher(script);
-
     if (!scriptTimestamp.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.TIMESTAMP_NOT_FOUND);
+      // Try alternative timestamp patterns for newer scripts
+      Pattern altTimestampPattern = Pattern.compile("\"sts\"\\s*:\\s*(\\d+)");
+      Matcher altTimestamp = altTimestampPattern.matcher(script);
+      if (altTimestamp.find()) {
+        scriptTimestamp = altTimestamp;
+      } else {
+        scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.TIMESTAMP_NOT_FOUND);
+      }
     }
 
-    Matcher globalVarsMatcher = GLOBAL_VARS_PATTERN.matcher(script);
-
-    if (!globalVarsMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.VARIABLES_NOT_FOUND);
+    // Try to extract signature function using JavaScript extractor
+    String sigFunction = "";
+    String sigActions = "";
+    String nFunction = "";
+    String globalVars = "";
+    
+    JavaScriptExtractor.SignatureFunctionInfo sigInfo = extractor.findSignatureFunction();
+    JavaScriptExtractor.NFunctionInfo nInfo = extractor.findNFunction();
+    
+    if (sigInfo != null) {
+      log.debug("Found signature function via JavaScript extractor: {}", sigInfo.functionName);
+      sigFunction = sigInfo.functionBody;
+      if (sigInfo.helperObjectBody != null) {
+        sigActions = sigInfo.helperObjectBody;
+      }
+    }
+    
+    if (nInfo != null) {
+      log.debug("Found n-function via JavaScript extractor: {}", nInfo.functionName);
+      nFunction = nInfo.functionBody;
+    }
+    
+    // If JavaScript extractor didn't find functions, fall back to regex patterns
+    if (sigFunction.isEmpty() || nFunction.isEmpty()) {
+      log.debug("JavaScript extractor found: sig={}, n={}", !sigFunction.isEmpty(), !nFunction.isEmpty());
+      log.debug("Falling back to regex patterns");
+      
+      // Extract global variables using regex as fallback
+      Matcher globalVarsMatcher = GLOBAL_VARS_PATTERN.matcher(script);
+      if (globalVarsMatcher.find()) {
+        globalVars = globalVarsMatcher.group("code");
+      } else {
+        // Try to find any variable declarations with arrays
+        Pattern altGlobalPattern = Pattern.compile("var\\s+([a-zA-Z_$][a-zA-Z_$0-9]*)\\s*=\\s*\\[[^\\]]+\\]");
+        Matcher altGlobal = altGlobalPattern.matcher(script);
+        if (altGlobal.find()) {
+          globalVars = altGlobal.group(0);
+        }
+      }
+      
+      // Only use regex fallback if JavaScript extractor didn't find signature function
+      if (sigFunction.isEmpty()) {
+        // Try to find actions object - be more flexible
+        Matcher sigActionsMatcher = ACTIONS_PATTERN.matcher(script);
+        
+        if (sigActionsMatcher.find()) {
+          sigActions = sigActionsMatcher.group(0);
+        } else {
+          // Try alternative pattern for transformation object
+          Pattern altActionsPattern = Pattern.compile(
+            "(?:var\\s+)?([a-zA-Z_$][a-zA-Z_$0-9]{0,2})\\s*=\\s*\\{[^}]*(?:splice|reverse)[^}]*\\}"
+          );
+          Matcher altActions = altActionsPattern.matcher(script);
+          if (altActions.find()) {
+            sigActions = altActions.group(0);
+          } else {
+            // For newer scripts, actions might be defined differently
+            log.warn("Could not find actions object in script: {}", sourceUrl);
+          }
+        }
+        
+        // Try multiple patterns for signature function
+        Matcher sigFunctionMatcher = SIG_FUNCTION_PATTERN.matcher(script);
+        
+        if (!sigFunctionMatcher.find()) {
+          // Try alternative patterns
+          Pattern[] altSigPatterns = {
+            // Pattern with split and join
+            Pattern.compile("([a-zA-Z_$][a-zA-Z_$0-9]*)=function\\(([a-zA-Z])\\)\\{[^}]*\\2\\.split\\([^}]*\\2\\.join\\([^}]*\\}"),
+            // Pattern with array manipulation  
+            Pattern.compile("([a-zA-Z_$][a-zA-Z_$0-9]*)=function\\(([a-zA-Z])\\)\\{[^}]*\\2\\[[^]]+\\][^}]*return[^}]*\\2[^}]*\\}"),
+            // Most flexible - any function that takes param and returns it
+            Pattern.compile("([a-zA-Z_$][a-zA-Z_$0-9]{1,3})=function\\(([a-zA-Z])\\)\\{[^}]{20,}return[^}]*\\2[^}]*\\}")
+          };
+          
+          for (Pattern pattern : altSigPatterns) {
+            Matcher altMatcher = pattern.matcher(script);
+            if (altMatcher.find()) {
+              sigFunctionMatcher = altMatcher;
+              sigFunction = altMatcher.group(0);
+              break;
+            }
+          }
+          
+          if (sigFunction.isEmpty()) {
+            scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.DECIPHER_FUNCTION_NOT_FOUND);
+          }
+        } else {
+          sigFunction = sigFunctionMatcher.group(0);
+        }
+      }
+      
+      // Only use regex fallback if JavaScript extractor didn't find n-function
+      if (nFunction.isEmpty()) {
+        // Try to find n-function with multiple patterns
+        Matcher nFunctionMatcher = N_FUNCTION_PATTERN.matcher(script);
+        
+        if (!nFunctionMatcher.find()) {
+          // Try alternative patterns - be more specific about what an n-function looks like
+          Pattern[] altNPatterns = {
+            // Pattern with enhanced_except explicitly  
+            Pattern.compile("([a-zA-Z_$][a-zA-Z_$0-9]{0,3})=function\\(([a-zA-Z])\\)\\{[^}]*enhanced_except[^}]*\\+[^}]*\\2[^}]*\\}", Pattern.DOTALL),
+            // Pattern that returns something with the parameter concatenated
+            Pattern.compile("([a-zA-Z_$][a-zA-Z_$0-9]{0,3})=function\\(([a-zA-Z])\\)\\{[^}]*catch[^}]*return[^}]*\\+\\s*\\2[^}]*\\}", Pattern.DOTALL),
+            // Pattern with variable assignment and array indexing (more typical n-function)
+            Pattern.compile("([a-zA-Z_$][a-zA-Z_$0-9]{0,3})=function\\(([a-zA-Z])\\)\\{[^}]*var\\s+[a-zA-Z_$][^}]*\\2\\[[^]]+\\][^}]*catch[^}]*\\}", Pattern.DOTALL)
+          };
+          
+          for (Pattern pattern : altNPatterns) {
+            Matcher altMatcher = pattern.matcher(script);
+            if (altMatcher.find()) {
+              nFunctionMatcher = altMatcher;
+              nFunction = altMatcher.group(0);
+              break;
+            }
+          }
+          
+          if (nFunction.isEmpty()) {
+            // N-function might not exist or be different in newer versions
+            // Use a passthrough function that doesn't transform the parameter
+            log.warn("Could not find n-function in script: {}, using passthrough", sourceUrl);
+            nFunction = "function(a){return a}"; // Passthrough function
+          }
+        } else {
+          nFunction = nFunctionMatcher.group(0);
+        }
+      }
     }
 
-    Matcher sigActionsMatcher = ACTIONS_PATTERN.matcher(script);
-
-    if (!sigActionsMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.SIG_ACTIONS_NOT_FOUND);
+    String timestamp = scriptTimestamp.group(scriptTimestamp.groupCount());
+    
+    // Handle n-function parameter extraction more carefully
+    String nfParameterName = "";
+    Pattern paramPattern = Pattern.compile("function\\s*\\(([a-zA-Z])\\)");
+    Matcher paramMatcher = paramPattern.matcher(nFunction);
+    if (paramMatcher.find()) {
+      nfParameterName = paramMatcher.group(1);
+      // Remove short-circuit that prevents n challenge transformation
+      nFunction = nFunction.replaceAll("if\\s*\\(typeof\\s*[^\\s()]+\\s*===?.*?\\)return " + Pattern.quote(nfParameterName) + "\\s*;?", "");
     }
-
-    Matcher sigFunctionMatcher = SIG_FUNCTION_PATTERN.matcher(script);
-
-    if (!sigFunctionMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.DECIPHER_FUNCTION_NOT_FOUND);
-    }
-
-    Matcher nFunctionMatcher = N_FUNCTION_PATTERN.matcher(script);
-
-    if (!nFunctionMatcher.find()) {
-      scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.N_FUNCTION_NOT_FOUND);
-    }
-
-    String timestamp = scriptTimestamp.group(2);
-    String globalVars = globalVarsMatcher.group("code");
-    String sigActions = sigActionsMatcher.group(0);
-    String sigFunction = sigFunctionMatcher.group(0);
-    String nFunction = nFunctionMatcher.group(0);
-
-    String nfParameterName = DataFormatTools.extractBetween(nFunction, "(", ")");
-    // Remove short-circuit that prevents n challenge transformation
-    nFunction = nFunction.replaceAll("if\\s*\\(typeof\\s*[^\\s()]+\\s*===?.*?\\)return " + nfParameterName + "\\s*;?", "");
 
     return new SignatureCipher(timestamp, globalVars, sigActions, sigFunction, nFunction, script);
   }
