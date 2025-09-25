@@ -286,6 +286,26 @@ public class SignatureCipherManager {
         scriptExtractionFailed(script, sourceUrl, ExtractionFailureType.TIMESTAMP_NOT_FOUND);
       }
     }
+    
+    // For modern YouTube scripts, extract the Y array which contains string constants
+    String yArrayDef = "";
+    Pattern yArrayPattern = Pattern.compile("var\\s+Y\\s*=\\s*\"([^\"]+)\"\\s*\\.\\s*split\\s*\\(\\s*\"([^\"]+)\"\\s*\\)");
+    Matcher yArrayMatcher = yArrayPattern.matcher(script);
+    if (yArrayMatcher.find()) {
+      // Reconstruct the Y array definition as JavaScript
+      String yContent = yArrayMatcher.group(1);
+      String delimiter = yArrayMatcher.group(2);
+      // Create JavaScript array definition
+      StringBuilder yArray = new StringBuilder("var Y = [");
+      String[] elements = yContent.split(Pattern.quote(delimiter));
+      for (int i = 0; i < elements.length; i++) {
+        if (i > 0) yArray.append(",");
+        yArray.append("\"").append(elements[i]).append("\"");
+      }
+      yArray.append("];");
+      yArrayDef = yArray.toString();
+      log.debug("Extracted Y array with {} elements", elements.length);
+    }
 
     // Try to extract signature function using JavaScript extractor
     String sigFunction = "";
@@ -301,6 +321,63 @@ public class SignatureCipherManager {
       sigFunction = sigInfo.functionBody;
       if (sigInfo.helperObjectBody != null) {
         sigActions = sigInfo.helperObjectBody;
+      }
+      
+      // For EP function, we need to extract Co and Hj helpers
+      if (sigInfo.functionName.equals("EP")) {
+        log.debug("EP function detected, extracting Co and Hj helpers");
+        
+        // Extract Co object - it contains nested functions so we need proper brace matching
+        Pattern coPattern = Pattern.compile("Co\\s*=\\s*\\{");
+        Matcher coMatcher = coPattern.matcher(script);
+        if (coMatcher.find()) {
+          int start = coMatcher.start();
+          int braceCount = 0;
+          int pos = coMatcher.end() - 1; // Start at the opening brace
+          
+          while (pos < script.length()) {
+            char c = script.charAt(pos);
+            if (c == '{') {
+              braceCount++;
+            } else if (c == '}') {
+              braceCount--;
+              if (braceCount == 0) {
+                String coObject = script.substring(start, pos + 1);
+                sigActions = (sigActions != null ? sigActions + ";" : "") + coObject;
+                log.debug("Added Co object to actions (length: {})", coObject.length());
+                break;
+              }
+            }
+            pos++;
+          }
+        }
+        
+        // Extract Hj function if used
+        if (sigFunction.contains("Hj(")) {
+          Pattern hjPattern = Pattern.compile("Hj\\s*=\\s*function\\([^)]+\\)\\{");
+          Matcher hjMatcher = hjPattern.matcher(script);
+          if (hjMatcher.find()) {
+            int start = hjMatcher.start();
+            int braceCount = 0;
+            int pos = hjMatcher.end() - 1; // Start at the opening brace
+            
+            while (pos < script.length()) {
+              char c = script.charAt(pos);
+              if (c == '{') {
+                braceCount++;
+              } else if (c == '}') {
+                braceCount--;
+                if (braceCount == 0) {
+                  String hjFunction = script.substring(start, pos + 1);
+                  sigActions = sigActions + ";" + hjFunction;
+                  log.debug("Added Hj function to actions (length: {})", hjFunction.length());
+                  break;
+                }
+              }
+              pos++;
+            }
+          }
+        }
       }
     }
     
@@ -427,8 +504,14 @@ public class SignatureCipherManager {
       // Remove short-circuit that prevents n challenge transformation
       nFunction = nFunction.replaceAll("if\\s*\\(typeof\\s*[^\\s()]+\\s*===?.*?\\)return " + Pattern.quote(nfParameterName) + "\\s*;?", "");
     }
+    
+    // Combine global variables with Y array if it exists
+    String combinedGlobals = globalVars;
+    if (!yArrayDef.isEmpty()) {
+      combinedGlobals = yArrayDef + ";" + globalVars;
+    }
 
-    return new SignatureCipher(timestamp, globalVars, sigActions, sigFunction, nFunction, script);
+    return new SignatureCipher(timestamp, combinedGlobals, sigActions, sigFunction, nFunction, script);
   }
 
   private void scriptExtractionFailed(String script, String sourceUrl, ExtractionFailureType failureType) {
